@@ -1,7 +1,6 @@
 """
-CodeAlpha Internship - Task 3: LSTM Training Script
-Run this separately to train an LSTM on MIDI data.
-Usage: python train_lstm.py --midi_dir ./midi_data --epochs 50
+CodeAlpha Task 3 - FINAL LSTM TRAINER
+Stable + Compatible + Better Training
 """
 
 import os
@@ -9,134 +8,149 @@ import argparse
 import pickle
 import numpy as np
 
-def install_if_missing(pkg, import_name=None):
+# ── INSTALL ─────────────────────────
+def install(pkg):
     import importlib, subprocess, sys
-    name = import_name or pkg
     try:
-        importlib.import_module(name)
-    except ImportError:
+        importlib.import_module(pkg)
+    except:
         subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
 
-install_if_missing("music21")
-install_if_missing("tensorflow")
-install_if_missing("numpy")
+install("music21")
+install("tensorflow")
+install("numpy")
 
-from music21 import corpus, converter, instrument, note, chord, stream
+from music21 import corpus, converter, instrument, note, chord
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.utils import to_categorical
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
 
 
-def extract_notes_from_midi(midi_path):
-    """Extract notes and chords from a MIDI file."""
+# ── EXTRACT NOTES ───────────────────
+def extract_notes(path):
     notes = []
     try:
-        midi = converter.parse(midi_path)
+        midi = converter.parse(path)
         parts = instrument.partitionByInstrument(midi)
-        elements = parts.parts[0] if parts else midi.flat
-        for el in elements.flat.notesAndRests:
+
+        elements = parts.parts[0].recurse() if parts else midi.recurse()
+
+        for el in elements:
             if isinstance(el, note.Note):
                 notes.append(str(el.pitch))
             elif isinstance(el, chord.Chord):
                 notes.append(".".join(str(n) for n in el.normalOrder))
+
     except Exception as e:
-        print(f"  Warning: could not parse {midi_path}: {e}")
+        print(f"Skip {path}: {e}")
+
     return notes
 
 
-def load_music21_corpus_samples():
-    """Load sample MIDI data from music21's built-in corpus."""
-    print("Loading music21 corpus samples (Bach chorales)...")
-    all_notes = []
-    # music21 has Bach chorales built in
-    paths = corpus.getComposer('bach')[:10]  # use first 10
-    for p in paths:
-        try:
-            score = corpus.parse(p)
-            for part in score.parts[:1]:  # first part only
-                for el in part.flat.notesAndRests:
-                    if isinstance(el, note.Note):
-                        all_notes.append(str(el.pitch))
-                    elif isinstance(el, chord.Chord):
-                        all_notes.append(".".join(str(n) for n in el.normalOrder))
-        except Exception as e:
-            print(f"  Skip {p}: {e}")
-    return all_notes
+# ── LOAD DATA ───────────────────────
+def load_data(midi_dir):
+    notes = []
 
-
-def train(midi_dir=None, epochs=50, seq_length=50, output_dir="./model_output"):
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Load notes
     if midi_dir and os.path.isdir(midi_dir):
-        print(f"Loading MIDI files from {midi_dir}...")
-        all_notes = []
+        print("Loading custom MIDI dataset...")
         for f in os.listdir(midi_dir):
             if f.endswith((".mid", ".midi")):
-                print(f"  Parsing: {f}")
-                all_notes.extend(extract_notes_from_midi(os.path.join(midi_dir, f)))
+                notes.extend(extract_notes(os.path.join(midi_dir, f)))
     else:
-        print("No MIDI directory provided — using music21 Bach corpus...")
-        all_notes = load_music21_corpus_samples()
+        print("Using music21 Bach dataset...")
+        for p in corpus.getComposer('bach')[:10]:
+            score = corpus.parse(p)
+            for part in score.parts[:1]:
+                for el in part.recurse():
+                    if isinstance(el, note.Note):
+                        notes.append(str(el.pitch))
+                    elif isinstance(el, chord.Chord):
+                        notes.append(".".join(str(n) for n in el.normalOrder))
 
-    if len(all_notes) < seq_length + 10:
-        print("❌ Not enough notes to train. Provide more MIDI files.")
+    return notes
+
+
+# ── TRAIN ───────────────────────────
+def train(midi_dir=None, epochs=50, seq_length=50, output_dir="model_output"):
+    os.makedirs(output_dir, exist_ok=True)
+
+    notes = load_data(midi_dir)
+
+    if len(notes) < seq_length:
+        print("❌ Not enough data")
         return
 
-    print(f"\n✅ Total notes extracted: {len(all_notes)}")
-    unique = sorted(set(all_notes))
+    print(f"Total notes: {len(notes)}")
+
+    unique = sorted(set(notes))
     n_vocab = len(unique)
-    print(f"   Unique elements: {n_vocab}")
 
     note_to_int = {n: i for i, n in enumerate(unique)}
     int_to_note = {i: n for n, i in note_to_int.items()}
 
     # Save mappings
-    with open(os.path.join(output_dir, "mappings.pkl"), "wb") as f:
-        pickle.dump({"note_to_int": note_to_int, "int_to_note": int_to_note, "unique": unique}, f)
+    with open(f"{output_dir}/mappings.pkl", "wb") as f:
+        pickle.dump((note_to_int, int_to_note), f)
 
     # Prepare sequences
     X, y = [], []
-    for i in range(len(all_notes) - seq_length):
-        X.append([note_to_int[n] for n in all_notes[i:i + seq_length]])
-        y.append(note_to_int[all_notes[i + seq_length]])
+    for i in range(len(notes) - seq_length):
+        X.append([note_to_int[n] for n in notes[i:i + seq_length]])
+        y.append(note_to_int[notes[i + seq_length]])
 
     X = np.reshape(X, (len(X), seq_length, 1)) / float(n_vocab)
-    y = to_categorical(y, num_classes=n_vocab)
+    y = to_categorical(y)
 
-    print(f"   Training samples: {len(X)}")
+    # Train/val split
+    split = int(len(X) * 0.9)
+    X_train, X_val = X[:split], X[split:]
+    y_train, y_val = y[:split], y[split:]
 
-    # Build LSTM model
+    print(f"Train samples: {len(X_train)} | Val: {len(X_val)}")
+
+    # Model
     model = Sequential([
-        LSTM(256, input_shape=(seq_length, 1), return_sequences=True),
+        LSTM(256, return_sequences=True, input_shape=(seq_length, 1)),
         Dropout(0.3),
         LSTM(256),
         Dropout(0.3),
         Dense(128, activation='relu'),
         Dense(n_vocab, activation='softmax')
     ])
-    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-    model.summary()
 
-    checkpoint_path = os.path.join(output_dir, "model_best.keras")
-    callbacks = [
-        ModelCheckpoint(checkpoint_path, save_best_only=True, monitor='loss', verbose=1),
-        EarlyStopping(patience=10, restore_best_weights=True)
-    ]
+    model.compile(loss='categorical_crossentropy', optimizer='adam')
 
-    print(f"\n🚀 Training for up to {epochs} epochs...")
-    model.fit(X, y, epochs=epochs, batch_size=64, callbacks=callbacks)
-    print(f"\n✅ Model saved to {checkpoint_path}")
-    print(f"   Mappings saved to {output_dir}/mappings.pkl")
-    print("\nTo generate music, run music_gen.py and load the trained model.")
+    # Callbacks
+    checkpoint = ModelCheckpoint(
+        f"{output_dir}/best_model.keras",
+        monitor="val_loss",
+        save_best_only=True,
+        verbose=1
+    )
+
+    early = EarlyStopping(patience=10, restore_best_weights=True)
+
+    # Train
+    model.fit(
+        X_train, y_train,
+        validation_data=(X_val, y_val),
+        epochs=epochs,
+        batch_size=64,
+        callbacks=[checkpoint, early]
+    )
+
+    print("✅ Training complete!")
 
 
+# ── MAIN ────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train LSTM on MIDI data")
-    parser.add_argument("--midi_dir", default=None, help="Path to folder with .mid files")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--midi_dir", default=None)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--seq_length", type=int, default=50)
-    parser.add_argument("--output_dir", default="./model_output")
+    parser.add_argument("--output_dir", default="model_output")
+
     args = parser.parse_args()
+
     train(args.midi_dir, args.epochs, args.seq_length, args.output_dir)
